@@ -1,0 +1,11 @@
+[package]
+name = "binary_writer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+byteorder = "1.5.0"
+flate2 = "1.1.0"
+integer-encoding = "4.0.2"
+leb128 = "0.2.5"
+regex = "1.11.1"
