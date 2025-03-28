@@ -14,53 +14,54 @@ impl BitEncoder {
         }
     }
 
-    pub fn encode_bits(&mut self, encoded_value: u16, num_bits: u8) {
+    pub fn encode_bits(&mut self, value: u16, num_bits: u8) {
+        // Ensure we only use the specified number of bits from the value
         let mask = (1u16 << num_bits) - 1;
-        let mut encode_value_in_bits = encoded_value & mask;
-        let current_byte_remaining_bits = 8 - self.bits_filled;
+        let mut remaining_value = value & mask;
 
-        if num_bits <= current_byte_remaining_bits {
-            self.current_byte |=
-                (encode_value_in_bits << (current_byte_remaining_bits - num_bits)) as u8;
+        // Calculate how many bits we can fit in the current byte
+        let available_bits = 8 - self.bits_filled;
+
+        if num_bits <= available_bits {
+            // Simple case: all bits fit in the current byte
+            self.current_byte |= (remaining_value << (available_bits - num_bits)) as u8;
             self.bits_filled += num_bits;
 
+            // If we've filled the byte, push it and reset
             if self.bits_filled == 8 {
                 self.bytes.push(self.current_byte);
                 self.current_byte = 0;
                 self.bits_filled = 0;
             }
         } else {
-            let num_bits_to_write = num_bits;
+            // Complex case: bits span multiple bytes
 
-            if self.bits_filled > 0 {
-                let shift_to_remove = num_bits_to_write - current_byte_remaining_bits;
-
-                self.current_byte |= ((encode_value_in_bits >> shift_to_remove)
-                    & ((1 << current_byte_remaining_bits) - 1))
-                    as u8;
-
+            // 1. Fill the current byte if it's partially filled or even if it is empty
+            // as the byte might start fresh here as well
+            if available_bits > 0 {
+                let bits_for_current = remaining_value >> (num_bits - available_bits);
+                self.current_byte |= bits_for_current as u8;
                 self.bytes.push(self.current_byte);
+
+                // Update the remaining value by removing the bits we just used
+                remaining_value &= (1 << (num_bits - available_bits)) - 1;
+            }
+
+            // 2. Write complete bytes while we have 8+ bits remaining
+            let mut bits_remaining = num_bits - available_bits;
+            while bits_remaining >= 8 {
+                let next_byte = (remaining_value >> (bits_remaining - 8)) as u8;
+                self.bytes.push(next_byte);
+                bits_remaining -= 8;
+            }
+
+            // 3. Store any leftover bits in the current byte
+            if bits_remaining > 0 {
+                self.current_byte = (remaining_value << (8 - bits_remaining)) as u8;
+                self.bits_filled = bits_remaining;
+            } else {
                 self.current_byte = 0;
                 self.bits_filled = 0;
-                encode_value_in_bits &= (1 << shift_to_remove) - 1;
-                println!("encode_value_in_bits &= (1 << shift_to_remove) - 1;");
-                println!("{:b}", encode_value_in_bits);
-            }
-
-            let mut bits_left = num_bits_to_write - current_byte_remaining_bits;
-            println!("bits_left= {:?}", bits_left);
-            while bits_left >= 8 {
-                let shift = bits_left - 8;
-                let next_byte = encode_value_in_bits >> shift;
-                println!("{:b}", next_byte);
-                self.bytes.push(next_byte as u8);
-                encode_value_in_bits &= (1 << shift) - 1;
-                bits_left -= 8;
-            }
-
-            if bits_left > 0 {
-                self.current_byte = (encode_value_in_bits << (8 - bits_left)) as u8;
-                self.bits_filled = bits_left;
             }
         }
     }
@@ -71,16 +72,180 @@ impl BitEncoder {
             self.bits_filled = 0;
         }
     }
+
+    pub fn encode(&mut self, values: &[u16]) {
+        for &v in values {
+            match v {
+                // 0
+                0 => self.encode_bits(0, 1),
+                // 10
+                u16::MAX => self.encode_bits(2, 2),
+                // 110
+                1 => self.encode_bits(6, 3),
+                other_value => {
+                    // 1110xxxxxxx
+                    if (2..=127).contains(&other_value) {
+                        self.encode_bits(14, 4);
+                        self.encode_bits(other_value, 7);
+                    } else {
+                        // 111xxxxxxxxxxxx
+                        self.encode_bits(15, 4);
+                        self.encode_bits(other_value, 11);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// this is the helper function that give the results in binary format
+// for validation. Note that this is one way of doing the encoding
+// However, the performance might be impact as storing a gigantic
+// string before converting might be a problem
+fn generate_test_output_validation(numbers: &[u16]) -> Vec<u8> {
+    let binary_strings: Vec<String> = numbers
+        .iter()
+        .map(|&num| {
+            let mut num_binary_str = format!("{:b}", num);
+            if num == 0 {
+                num_binary_str = String::from("0");
+            } else if num == 1 {
+                num_binary_str = String::from("110");
+            } else if (2..=127).contains(&num) {
+                let padding_zeros = 7 - num_binary_str.len();
+                let padding_zeros_str = "0".repeat(padding_zeros);
+                num_binary_str = format!("1110{}{}", padding_zeros_str, num_binary_str);
+            } else if 127 < num && num < u16::MAX {
+                let padding_zeros = 11 - num_binary_str.len();
+                let padding_zeros_str = "0".repeat(padding_zeros);
+                num_binary_str = format!("1111{}{}", padding_zeros_str, num_binary_str);
+            } else {
+                num_binary_str = String::from("10");
+            }
+            num_binary_str
+        })
+        .collect();
+
+    let combined_binary = binary_strings.join("");
+
+    (0..combined_binary.len())
+        .step_by(8)
+        .map(|i| {
+            let end = std::cmp::min(i + 8, combined_binary.len());
+            let mut chunk = combined_binary[i..end].to_string();
+
+            if chunk.len() < 8 {
+                chunk.push_str(&"0".repeat(8 - chunk.len()));
+            }
+
+            u8::from_str_radix(&chunk, 2).unwrap()
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_multiple_all_negative_values() {
+        let mut encoder = BitEncoder::new();
+        let input = vec![
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+            65535, 65535, 65535, 65535,
+        ];
+        let results = generate_test_output_validation(&input);
+        encoder.encode(&input);
+        encoder.flush();
+
+        assert_eq!(encoder.bytes, results);
+        assert_eq!(encoder.bits_filled, 0);
+    }
 
     #[test]
+    fn test_multiple_random_large_values() {
+        let mut encoder = BitEncoder::new();
+        let input = vec![
+            51, 39, 38, 33, 35, 30, 25, 18, 20, 16, 16, 11, 15, 9, 11, 12, 7, 9, 16, 11, 10, 14,
+            22, 30, 21, 30, 32, 44, 35, 36, 53, 63, 56, 61, 71, 74, 79, 82, 97, 114, 101, 99, 98,
+            104, 102, 109, 107, 120, 113, 123, 115, 118, 102, 89, 118, 113, 105, 91, 98, 92, 101,
+            87, 110, 99, 83, 95, 91, 84, 81, 107, 90, 86, 68, 80, 75, 76, 65, 68, 58, 62, 49, 59,
+            61, 52, 75, 68, 57, 62, 56, 58, 60, 49, 48, 40, 40, 32,
+        ];
+        let results = generate_test_output_validation(&input);
+        encoder.encode(&input);
+        encoder.flush();
+
+        assert_eq!(encoder.bytes, results);
+        assert_eq!(encoder.bits_filled, 0);
+    }
+
+    #[test]
+    fn test_multiple_random_with_negative() {
+        let mut encoder = BitEncoder::new();
+        let input = vec![
+            8, 10, 7, 8, 3, 3, 6, 4, 3, 1, 5, 0, 5, 2, 2, 3, 2, 2, 5, 4, 1, 13, 17, 25, 36, 47, 66,
+            49, 67, 62, 82, 86, 109, 115, 102, 103, 85, 109, 105, 120, 103, 65535, 65535, 65535,
+            65535, 65535, 102, 113, 116, 127, 124, 119, 114, 122, 118, 115, 134, 125, 114, 132,
+            152, 171, 160, 159, 167, 158, 153, 161, 156, 177, 141, 134, 131, 112, 98, 79, 82, 72,
+            71, 66, 59, 49, 42, 45, 35, 41, 45, 38, 38, 31, 29, 16, 28, 15, 19, 4,
+        ];
+        let results = generate_test_output_validation(&input);
+        encoder.encode(&input);
+        encoder.flush();
+
+        assert_eq!(encoder.bytes, results);
+        assert_eq!(encoder.bits_filled, 0);
+    }
+    #[test]
+    fn test_multiple_random_values() {
+        let mut encoder = BitEncoder::new();
+        let input = vec![
+            14, 27, 28, 48, 37, 32, 35, 26, 17, 14, 11, 8, 11, 13, 13, 6, 8, 6, 5, 9, 4, 5, 4, 9,
+            4, 12, 16, 18, 13, 14, 26, 22, 15, 18, 35, 31, 24, 30, 42, 43, 46, 72, 64, 57, 62, 59,
+            68, 53, 67, 69, 71, 75, 55, 73, 58, 60, 57, 56, 79, 60, 71, 71, 61, 71, 57, 63, 61, 61,
+            71, 57, 69, 62, 75, 58, 62, 63, 51, 57, 52, 54, 43, 49, 42, 43, 45, 61, 40, 34, 51, 37,
+            33, 31, 23, 19, 16, 12,
+        ];
+        let results = generate_test_output_validation(&input);
+        encoder.encode(&input);
+        encoder.flush();
+
+        assert_eq!(encoder.bytes, results);
+        assert_eq!(encoder.bits_filled, 0);
+    }
+
+    #[test]
+    fn test_multiple_zeros() {
+        let mut encoder = BitEncoder::new();
+        encoder.encode(&[
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        encoder.flush();
+        assert_eq!(
+            encoder.bytes,
+            vec![
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000
+            ]
+        );
+        assert_eq!(encoder.bits_filled, 0);
+    }
+    #[test]
     fn test_single_value_for_7_bits() {
-        let encoder = encode_test_data(&[42]);
-        // 1110 0101010 (11 bits) = 42 (1110 + 0101010)
+        let mut encoder = BitEncoder::new();
+        encoder.encode(&[42]);
+        encoder.flush();
+
         assert_eq!(encoder.bytes, vec![0b11100101, 0b01000000]);
         assert_eq!(encoder.bits_filled, 0);
     }
@@ -95,12 +260,7 @@ mod tests {
 
     #[test]
     fn test_mixed_values() {
-        // Test a mix of different value types
         let encoder = encode_test_data(&[42, 1000]);
-        // Bit pattern:
-        // 1110 0101010 (11 bits) = 42 (1110 + 0101010)
-        // 1111 01111101000(15 bits) = 1000 (1111 + 00011111010)
-        // Total: 32 bits = 4 bytes
         assert_eq!(
             encoder.bytes,
             vec![0b11100101, 0b01011110, 0b11111010, 0b00000000]
